@@ -1,0 +1,2 @@
+class InvalidInputShape(Exception):
+    pass
