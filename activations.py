@@ -3,6 +3,7 @@ from numpy import exp
 
 import numpy as np
 
+
 def ReLU(x):
     return max(0.1 * x, x)
 
@@ -13,6 +14,7 @@ def tanh(x):
 
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
+
 
 def sigmoid_deriv(self, x):
     # compute the derivative of the sigmoid function ASSUMING

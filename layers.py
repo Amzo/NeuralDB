@@ -28,7 +28,7 @@ def Dense(neurons=int, databaseLocation=str):
 def Compile(databaseLocation=str):
     database = neuralDB.NeuralDB()
     database.databaseLocation = databaseLocation
-    database.connectLayers()
+    database.connect_layers()
     database.addRandomWeights()
 
 
