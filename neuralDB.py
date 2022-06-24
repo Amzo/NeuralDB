@@ -20,6 +20,7 @@ class NeuralDB:
         self.sum = 0.0
         self.writeCount = 0
         self.outputErrors = []
+        self.totalError = 0
 
     def connect_to_db(self, performance):
         self.connection = sqlite3.connect(self.databaseLocation, isolation_level='DEFERRED')
@@ -28,24 +29,24 @@ class NeuralDB:
             self.database.execute('''PRAGMA synchronous = OFF''')
             self.database.execute('''PRAGMA journal_mode = OFF''')
 
-    def create_table(self, tableName=str, tableType=str, counter=int):
-        self.database.execute("DROP TABLE if exists {};".format(tableName))
+    def create_table(self, tablename=str, tabletype=str, counter=int):
+        self.database.execute("DROP TABLE if exists {};".format(tablename))
 
-        if tableType == "Input":
+        if tabletype == "Input":
             sqlCommand = '''CREATE TABLE if not exists inputNeuron (neuronID INTEGER PRIMARY KEY, x FLOAT)'''
-        elif tableType == "Dense":
+        elif tabletype == "Dense":
             sqlCommand = 'CREATE TABLE if not exists Dense{} (neuronID INTEGER PRIMARY KEY, output FLOAT)'.format(
                 counter)
-        elif tableType == "Error":
-            if tableName == "inputErrors":
+        elif tabletype == "Error":
+            if tablename == "inputErrors":
                 sqlCommand = 'CREATE TABLE if not exists inputErrors (neuronID INTEGER, errors FLOAT, ' \
                              'FOREIGN KEY (NeuronID) References inputNeuron (neuronID));'
             else:
                 sqlCommand = 'CREATE TABLE if not exists Error{} (neuronID INTEGER, errors FLOAT, ' \
                              'FOREIGN KEY (NeuronID) References Dense{} (neuronID));'.format(counter, counter)
-        elif tableType == "Connections":
+        elif tabletype == "Connections":
             sqlCommand = 'CREATE TABLE if not exists Connections{} (neuronID INTEGER, connectedNeurons INTEGER, ' \
-                         'weights FLOAT, FOREIGN KEY (ConnectedNeurons) References '.format(counter)
+                         'weights FLOAT, gradient FLOAT, FOREIGN KEY (ConnectedNeurons) References '.format(counter)
 
             sqlCommand += 'Dense{} (neuronID), '.format(counter)
 
@@ -63,7 +64,7 @@ class NeuralDB:
         self.database.close()
         self.connection.close()
 
-    def addTableEntry(self, id=int, x=float, tableName=str):
+    def add_table_entry(self, id=int, x=float, tableName=str):
         data = [id, x]
 
         if tableName == "inputNeuron":
@@ -75,14 +76,14 @@ class NeuralDB:
 
         self.database.execute(sqlCommand, data)
 
-    def getInput(self, table):
+    def get_input(self, table):
         sqlCommand = 'SELECT COUNT(*) FROM {};'.format(table)
         self.database.execute(sqlCommand)
         inputRows = self.database.fetchone()[0]
 
         return inputRows
 
-    def denseTableExists(self):
+    def dense_table_exists(self):
         sqlCommand = 'SELECT count(*) FROM sqlite_master where type="table" and tbl_name=\"Dense{}\";'.format(
             self.denseCounter)
         self.database.execute(sqlCommand)
@@ -90,7 +91,7 @@ class NeuralDB:
         # returns 1 if found 0 if not
         return self.database.fetchone()[0]
 
-    def getDenseLayers(self):
+    def get_dense_layer(self):
         tableFound = True
 
         if self.denseCounter > 1:
@@ -98,35 +99,38 @@ class NeuralDB:
 
         while tableFound:
             self.denseCounter += 1
-            if not self.denseTableExists():
+            if not self.dense_table_exists():
                 # off by 1
                 self.denseCounter -= 1
                 tableFound = False
 
-    def addNewKeyToConnections(self):
-        self.create_table("Connections")
-        self.connection.commit()
-
     def addToInputX(self, dataInput):
         for y in range(1, len(dataInput) + 1):
-            sqlCommand = "UPDATE inputNeuron SET x = {} WHERE neuronID = {};".format(dataInput[y - 1], y)
+            sqlCommand = "UPDATE inputNeuron SET x = {} WHERE neuronID = {};".format(dataInput[y - 1] / 255, y)
             self.database.execute(sqlCommand)
+
         self.connection.commit()
 
     # To save on computational costs, don't fully connect the layers, instead if the size of the previous layer
     # is greater than 20 neurons, only connect 10% of the nodes to each following node.
     def connect_layers(self, neuronID=int, table1=str, table2=str, layer=int, size=int):
         # get previous table number of neurons
-        input1 = self.getInput(table1)
+        input1 = self.get_input(table1)
         input2 = size
         if input1 < 20:
             for table1Neurons in range(1, input1 + 1):
                 weights = random.uniform(-1, 1)
 
                 self.database.executemany(
-                    "INSERT INTO Connections{} (neuronID, connectedNeurons, weights) VALUES (?,?, ?)".format(layer),
-                    [(table1Neurons, neuronID, weights)])
+                    "INSERT INTO Connections{} (neuronID, connectedNeurons, weights, gradient) VALUES (?,?,?,?)".format(
+                        layer),
+                    [(table1Neurons, neuronID, weights, 0)])
                 self.writeCount += 1
+            # add a final input for the bias to the connected node.
+            weights = random.uniform(-1, 1)
+            self.database.executemany(
+                "INSERT INTO Connections{} (connectedNeurons, weights, gradient) VALUES (?, ?, ?)".format(layer),
+                [(neuronID, weights, 0)])
         else:
             rangeScope = input1 // 10 + (input1 % 10 > 0)
 
@@ -147,9 +151,14 @@ class NeuralDB:
                 weights = random.uniform(-1, 1)
 
                 self.database.executemany(
-                    "INSERT INTO Connections{} (neuronID, connectedNeurons, weights) VALUES (?,?, ?)".format(layer),
-                    [(table1Neurons, neuronID, weights)])
+                    "INSERT INTO Connections{} (neuronID, connectedNeurons, weights, gradient) VALUES (?,?,?,?)".format(
+                        layer),
+                    [(table1Neurons, neuronID, weights, 0)])
                 self.writeCount += 1
+            weights = random.uniform(-1, 1)
+            self.database.executemany(
+                "INSERT INTO Connections{} (connectedNeurons, weights, gradient) VALUES (?, ?, ?)".format(layer),
+                [(neuronID, weights, 0)])
 
             self.multiplier += 1
 
@@ -174,54 +183,101 @@ class NeuralDB:
                 self.connect_layers(neuronID=connectedNeuron, table1="Dense{}".format(counter - 1),
                                     table2="Dense{}".format(counter), layer=counter, size=neurons)
 
-    def calculate_gradients(self, layer):
-        #  1) for the gradient first get all the output derivative of leaky ReLu for the current layer
-        #  2) multiply that output derivative by the output error
-        #  3) times that result by the learning rate, using a constant 0.001 for now
-
-        # derivative of output, multiply it by the errors, then times by learning rate.
-        # use sql for all calculations
-        sqlCommand = "SELECT 0.001 * errors * t.results " \
-                     "FROM Dense{}, Error{}, " \
-                     "( " \
-                     "SELECT IIF(output>0, 1, 0.01) as results " \
-                     "FROM Dense{}" \
-                     ") t " \
-                     "GROUP by Dense{}.neuronID".format(layer, layer, layer, layer)
+    def update_deltas(self, count, actual, target):
+        sqlCommand = "update Error2 set errors = ({} - {}) * {} * (1 - {}) where neuronID = {}".format(actual, target, actual, actual, count)
 
         self.database.execute(sqlCommand)
 
-        weight_updates = self.database.fetchall()
-
-        numNeurons = self.getInput("Dense{}".format(layer))
-        # time all weights connected to ouput 1 by gradient
-        for x in range(1, numNeurons + 1):
-            sqlCommand = "Select {} * weights from Connections{} " \
-                         "where connectedNeurons = {}".format(str(weight_updates[x - 1][0]), layer, x)
-
-            self.database.execute(sqlCommand)
-            results = self.database.fetchall()
-            weight_deltas = []
-            for idx, val in enumerate(results):
-                # multiply each weight with the gradient to get the deltas
-                sqlCommand = "SELECT weights * {} " \
-                             "FROM Connections{} " \
-                             "WHERE NeuronID = {} and connectedNeurons = {}".format(val[0], layer, idx + 1, x)
-
-                self.database.execute(sqlCommand)
-
-                weight_deltas.append(self.database.fetchone())
-
-            # update the current weight by adding the  delta
-            for idx, y in enumerate(weight_deltas):
-                sqlCommand = "UPDATE Connections{} set weights = weights + {} " \
-                             "WHERE neuronID  = {} and ConnectedNeurons = {}".format(layer, y[0], idx + 1, x)
+    def calculate_gradients(self, layer, label):
+        # gradients for the output layer
+        # needs optimized
+        if layer == self.denseCounter:
+            neurons = self.get_input("Dense{}".format(layer))
+            prevLayer = layer - 1
+            for neuron in range(1, neurons + 1):
+                sqlCommand = "UPDATE Connections{} SET gradient = t.gradient " \
+                             "FROM " \
+                             "( " \
+                                "SELECT Connections{}.neuronID as neuron, connectedNeurons, errors * Dense{}.output AS gradient " \
+                                "FROM Connections{} " \
+                                "JOIN Dense{} on Connections{}.neuronID = Dense{}.neuronID " \
+                                "JOIN Error{} on Connections{}.connectedNeurons = Error{}.neuronID " \
+                                "WHERE connectedNeurons = {} " \
+                             ") t " \
+                             "WHERE Connections{}.neuronID = t.neuron " \
+                             "AND Connections{}.connectedNeurons = {}".format(layer, layer, prevLayer, layer, prevLayer, layer, prevLayer, layer, layer, layer, neuron, layer, layer, neuron)
 
                 self.database.execute(sqlCommand)
 
+                # bias gradients are just the deltas
+                sqlCommand = "update Connections{} set gradient = t.gradient " \
+                             "FROM " \
+                             "( " \
+                                 "SELECT errors as gradient " \
+                                 "FROM Error{} " \
+                                 "WHERE neuronID = {} " \
+                             ") t " \
+                             "WHERE Connections{}.neuronID is null " \
+                             "AND Connections{}.connectedNeurons = {}".format(layer, layer, neuron, layer, layer, neuron)
+
+                self.database.execute(sqlCommand)
+            self.commit_changes()
+        else:
+            # work through the next layers
+            neurons = self.get_input("Dense{}".format(layer))
+            for neuron in range(1, neurons + 1):
+                sqlCommand = "update Error{} set errors = t.delta " \
+                             "from " \
+                             "( " \
+                                 "select sum(errors * weights) as delta " \
+                                 "from Connections{} " \
+                                 "join Error{} on Error{}.neuronID = Connections{}.connectedNeurons " \
+                                 "where Connections{}.neuronID = {} " \
+                             ") t " \
+                             "where neuronID = {}".format(layer, layer + 1, layer + 1, layer +1, layer + 1, layer + 1, neuron, neuron)
+
+                self.database.execute(sqlCommand)
+
+            self.commit_changes()
+            # part two of the calculations is the same as deltas for ouput nodes. outb1 * (1 - outb1)
+            if layer == 1:
+                neurons = self.get_input("inputNeuron")
+                for neuron in range(1, neurons + 1):
+                    sqlCommand = "update Connections{} set gradient = t.result " \
+                                 "FROM " \
+                                 "( " \
+                                 "SELECT Connections{}.connectedNeurons as target, (errors * (output * ( 1 - output)) * x) as result " \
+                                 "FROM Connections{} " \
+                                 "JOIN Error{} on Connections{}.connectedNeurons = Error{}.neuronID " \
+                                 "JOIN inputNeuron on Connections{}.neuronID = inputNeuron.neuronID " \
+                                 "JOIN Dense{} on Connections{}.connectedNeurons = Dense{}.neuronID " \
+                                 "WHERE Connections{}.neuronID = {} " \
+                                 ") t " \
+                                 "WHERE Connections{}.connectedNeurons = t.target " \
+                                 "AND Connections{}.neuronID = {}".format(layer, layer, layer, layer, layer, layer, layer, layer, layer, layer, layer, neuron, layer, layer, neuron)
+
+                    self.database.execute(sqlCommand)
+
+                # finally update the bais gradients
+                sqlCommand = "update Connections{} set gradient = t.result " \
+                             "FROM " \
+                             "( " \
+                                "SELECT Connections{}.connectedNeurons as target, errors * (output * ( 1 - output)) as result " \
+                                "FROM Connections{} " \
+                                "JOIN Error{} on Connections{}.connectedNeurons = Error{}.neuronID " \
+                                "JOIN Dense{} on Connections{}.connectedNeurons = Dense{}.neuronID " \
+                                "WHERE Connections{}.neuronID is null " \
+                             ") t " \
+                             "WHERE Connections{}.connectedNeurons = t.target " \
+                             "AND Connections{}.neuronID is null".format(layer, layer, layer, layer, layer, layer, layer, layer, layer, layer, layer, layer)
+                self.database.execute(sqlCommand)
+                self.commit_changes()
+
+    def update_weights(self, layer):
+        # weight - learning rate * gradient
+        sqlCommand = "update Connections{} set weights = Connections{}.weights - 0.5 * gradient".format(layer, layer)
+        self.database.execute(sqlCommand)
         self.commit_changes()
-
-        # multiply the gradients by the output to compute the deltas
 
     def update_errors(self, layer):
         if layer == -1:
@@ -231,16 +287,16 @@ class NeuralDB:
         else:
             # first layer is always the input layer, due to naming of layers handle this
             if layer == 1:
-                neurons = self.getInput("inputNeuron")
-                outputNeurons = self.getInput("Dense{}".format(layer))
+                neurons = self.get_input("inputNeuron")
+                outputNeurons = self.get_input("Dense{}".format(layer))
             else:
-                neurons = self.getInput("Dense{}".format(layer - 1))
-                outputNeurons = self.getInput("Dense{}".format(layer))
+                neurons = self.get_input("Dense{}".format(layer - 1))
+                outputNeurons = self.get_input("Dense{}".format(layer))
 
             for i in range(1, neurons + 1):
                 errorResults = []
                 for x in range(1, outputNeurons + 1):
-                    sqlCommand = "SELECT weights * t.error " \
+                    sqlCommand = "SELECT (weights * t.error) " \
                                  "FROM Connections{}, " \
                                  "( " \
                                  "SELECT Error{}.errors as error " \
@@ -260,36 +316,54 @@ class NeuralDB:
                     sqlCommand = "UPDATE Error{} set errors = {} where NeuronID = {}".format(layer - 1, sum, i)
                 self.database.execute(sqlCommand)
 
-    def getWeights(self, layer):
-        # Leaky ReLU where A is 0.01 and Z is the input * weights
+    def feed_forward_network(self, layer):
+        # SQlite doesn't support Eeulers number, so hard code it as 2.71828 to allow sqlite to do the sigmoid activation.
         if layer == 1:
-            sqlCommand = "UPDATE Dense1 SET output = MAX(0.01 * t.sumWeights, t.sumWeights) " \
+            sqlCommand = "UPDATE Dense1 SET output = 1 / (1 + pow(2.71828, -(t.sumWeights + ( 1 * w.bias)))) " \
                          "FROM " \
                          "(" \
                          "SELECT Connections1.connectedNeurons, " \
                          "SUM(inputNeuron.x * Connections1.weights) as sumWeights " \
                          "FROM Connections1 JOIN inputNeuron " \
                          "ON Connections1.neuronID = inputNeuron.neuronID " \
+                         "WHERE Connections1.neuronID is not null " \
                          "group by Connections1.connectedNeurons " \
-                         ") t " \
-                         "WHERE Dense1.neuronID = t.connectedNeurons"
+                         ") t, " \
+                         "( " \
+                         "SELECT Connections1.connectedNeurons, Connections1.weights as bias " \
+                         "FROM Connections1 " \
+                         "where Connections1.neuronID is null " \
+                         ") w " \
+                         "WHERE Dense1.neuronID = t.connectedNeurons and Dense1.neuronID = w.connectedNeurons"
         else:
-            sqlCommand = "UPDATE Dense{} SET output = MAX(0.01 * t.sumWeights, t.sumWeights) " \
-                         "FROM " \
-                         "(" \
+            sqlCommand = "UPDATE Dense{} SET output = 1 / (1 + pow(2.71828, -(t.sumWeights + ( 1 * w.bias))))" \
+                         "FROM ( " \
                          "SELECT Connections{}.connectedNeurons, " \
                          "SUM(Dense{}.output * Connections{}.weights) as sumWeights " \
                          "FROM Connections{} JOIN Dense{} " \
                          "ON Connections{}.neuronID = Dense{}.neuronID " \
+                         "WHERE Connections{}.neuronID is not null " \
                          "group by Connections{}.connectedNeurons " \
-                         ") t " \
-                         "WHERE Dense{}.neuronID = t.connectedNeurons".format(layer, layer, layer - 1, layer, layer,
-                                                                              layer - 1, layer, layer - 1, layer, layer)
+                         ") t, " \
+                         "( " \
+                         "SELECT Connections{}.connectedNeurons, Connections{}.weights as bias " \
+                         "FROM Connections{} " \
+                         "WHERE Connections{}.neuronID is null " \
+                         ") w " \
+                         "WHERE Dense{}.neuronID = t.connectedNeurons " \
+                         "and Dense{}.neuronID = w.connectedNeurons".format(layer, layer, layer - 1, layer, layer,
+                                                                            layer - 1, layer, layer - 1, layer, layer,
+                                                                            layer, layer, layer, layer, layer, layer)
 
         self.database.execute(sqlCommand)
 
-    def indexDatabase(self, numOfConnections=int):
+        # add bias to output
+
+    def index_database(self, numOfConnections=int):
         for x in range(1, numOfConnections):
             print("indexing connection table {}".format(x))
             sqlCommand = "CREATE index connects{} ON Connections{} ('connectedNeurons' ASC)".format(x, x)
             self.database.execute(sqlCommand)
+
+        sqlCommand = "CREATE index input ON inputNeuron ('neuronID' ASC)"
+        self.database.execute(sqlCommand)

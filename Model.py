@@ -1,4 +1,8 @@
 import time
+from random import randint
+
+import numpy as np
+from tqdm import tqdm
 
 import neuralDB
 
@@ -18,27 +22,27 @@ class Model:
         #    raise Errors.InvalidInputShape("Inputshape should be a tuple")
 
         self.neuralDB.connect_to_db(True)
-        self.neuralDB.create_table(tableName="inputNeuron", tableType="Input", counter=0)
-        self.neuralDB.create_table(tableName="inputErrors", tableType="Error")
+        self.neuralDB.create_table(tablename="inputNeuron", tabletype="Input", counter=0)
+        self.neuralDB.create_table(tablename="inputErrors", tabletype="Error")
 
         neuron = shape
 
         # populate with 0.0s
         # remove me later
         for neuronID in range(1, neuron + 1):
-            self.neuralDB.addTableEntry(id=neuronID, x=0.0, tableName="inputNeuron")
-            self.neuralDB.addTableEntry(id=neuronID, x=0.0, tableName="inputErrors")
+            self.neuralDB.add_table_entry(id=neuronID, x=0.0, tableName="inputNeuron")
+            self.neuralDB.add_table_entry(id=neuronID, x=0.0, tableName="inputErrors")
 
         self.neuralDB.commit_changes()
         self.neuralDB.close()
 
     def dense(self, neurons=int):
         self.neuralDB.connect_to_db(True)
-        self.neuralDB.create_table(tableName="Connections{}".format(self.denseCounter), tableType="Connections",
+        self.neuralDB.create_table(tablename="Connections{}".format(self.denseCounter), tabletype="Connections",
                                    counter=self.denseCounter)
-        self.neuralDB.create_table(tableName="Dense{}".format(self.denseCounter), tableType="Dense",
+        self.neuralDB.create_table(tablename="Dense{}".format(self.denseCounter), tabletype="Dense",
                                    counter=self.denseCounter)
-        self.neuralDB.create_table(tableName="Error{}".format(self.denseCounter), tableType="Error",
+        self.neuralDB.create_table(tablename="Error{}".format(self.denseCounter), tabletype="Error",
                                    counter=self.denseCounter)
 
         self.neuralDB.addNeurons(neurons, counter=self.denseCounter)
@@ -56,46 +60,69 @@ class Model:
         # ray allows executing them in parallel. speed is down from 24s to 5s on a complex model.
 
         for x in range(1, self.neuralDB.denseCounter + 1):
-            self.neuralDB.getWeights(x)
+            self.neuralDB.feed_forward_network(x)
 
         self.neuralDB.commit_changes()
 
-    def __backpass(self):
+    def __backpass(self, label):
         # get error
         errors = self.neuralDB.getResults()
+        results = 0
         self.neuralDB.outputErrors = []
 
+        # tidy this stuff up
+        count = 0
         for y in errors:
             # each index represents the corresponding output neuron
-            self.neuralDB.outputErrors.append(self.labels[0] - y[0])
+            # (actual – forecast)2
+            self.neuralDB.outputErrors.append((label[count] - y[0]) ** 2)
 
-        self.neuralDB.update_errors(-1)
-        # Need to loop through each layer backwards
-        for x in range(self.neuralDB.denseCounter, 0, -1):
-            self.neuralDB.update_errors(x)
+            # deltas are (actual - target) * actual * ( 1 - actual)
+            self.neuralDB.update_deltas(count + 1, y[0], label[count])
+            count += 1
 
         self.neuralDB.commit_changes()
 
-        # Calculate the gradients
-        for x in range(self.neuralDB.denseCounter, 0, -1):
-            self.neuralDB.calculate_gradients(x)
+        # Mean Squared error  (1/n) * Σ(actual – forecast)2
+        self.neuralDB.totalError = 1 / 10 * sum(self.neuralDB.outputErrors)
+
+        # Need to loop through each layer backwards
+        for layer in range(self.neuralDB.denseCounter, 0, -1):
+            self.neuralDB.calculate_gradients(layer, label)
+
+        # updates the weights
+        for layer in range(1, self.neuralDB.denseCounter + 1):
+            self.neuralDB.update_weights(layer)
 
     def fit(self, train=list, labels=list, epochs=int):
         self.labels = labels
 
         self.neuralDB.connect_to_db(True)
-        self.neuralDB.getDenseLayers()
+        self.neuralDB.get_dense_layer()
+
         print("Starting Training")
         start_time = time.time()
-        for i in range(1, epochs):
-            self.__fowardPass(train)
-            self.__backpass()
+        #pbar = tqdm(range(len(train)))
+        for i in range(1, epochs + 1):
+            print("Epoch: {}".format(i))
+            #for x in pbar:
+            idx = randint(0, len(train) - 1)
+            self.__fowardPass(train[idx][:, :, 0].flatten())
+            self.__backpass(labels[idx])
+            #pbar.set_description("Current Loss {}".format(self.neuralDB.totalError, '.8f'))
 
         print("finished training {} epochs in  {} seconds".format(epochs, time.time() - start_time))
+
+    def predict(self, train=list):
+        self.neuralDB.connect_to_db(True)
+        self.neuralDB.get_dense_layer()
+        self.__fowardPass(train)
+        found = self.neuralDB.getResults()
+        print(found[0])
 
     # optimize the database for faster searching and joins, increases speed substantially
     def optimize(self):
         self.neuralDB.connect_to_db(True)
-        self.neuralDB.indexDatabase(self.denseCounter)
+        self.neuralDB.index_database(self.denseCounter)
         self.neuralDB.commit_changes()
         self.neuralDB.close()
